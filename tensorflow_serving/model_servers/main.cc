@@ -57,9 +57,11 @@ limitations under the License.
 #include "grpc++/support/status.h"
 #include "grpc++/support/status_code_enum.h"
 #include "grpc/grpc.h"
+#include "tensorflow/c/c_api.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/init_main.h"
+#include "tensorflow/core/platform/load_library.h"
 #include "tensorflow/core/platform/protobuf.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/protobuf/config.pb.h"
@@ -312,6 +314,8 @@ int main(int argc, char** argv) {
   tensorflow::int64 tensorflow_session_parallelism = 0;
   string platform_config_file = "";
   string model_config_file;
+  string librarypath;
+
   std::vector<tensorflow::Flag> flag_list = {
       tensorflow::Flag("port", &port, "port to listen on"),
       tensorflow::Flag("enable_batching", &enable_batching, "enable batching"),
@@ -342,11 +346,14 @@ int main(int argc, char** argv) {
                        "Tensorflow session. Auto-configured by default."
                        "Note that this option is ignored if "
                        "--platform_config_file is non-empty."),
+      tensorflow::Flag("loadlibrary", &librarypath,
+                       "load additional operators from given user_op library"),
       tensorflow::Flag("platform_config_file", &platform_config_file,
                        "If non-empty, read an ascii PlatformConfigMap protobuf "
                        "from the supplied file name, and use that platform "
                        "config instead of the Tensorflow platform. (If used, "
                        "--enable_batching is ignored.)")};
+
   string usage = tensorflow::Flags::Usage(argv[0], flag_list);
   const bool parse_result = tensorflow::Flags::Parse(&argc, argv, flag_list);
   if (!parse_result || (model_base_path.empty() && model_config_file.empty())) {
@@ -356,6 +363,20 @@ int main(int argc, char** argv) {
   tensorflow::port::InitMain(argv[0], &argc, &argv);
   if (argc != 1) {
     std::cout << "unknown argument: " << argv[1] << "\n" << usage;
+  }
+
+
+  if (librarypath.size() > 0) {
+    TF_Status* status = TF_NewStatus();
+    // Load the library.
+      TF_LoadLibrary(librarypath.c_str(), status);
+      if (!TF_GetCode(status) == TF_OK) {
+        string status_msg(TF_Message(status));
+        std::cout << "Problem loading user_op library " <<  librarypath << ": " <<
+            TF_Message(status);
+        return -1;
+    }
+    TF_DeleteStatus(status);
   }
 
   // For ServerCore Options, we leave servable_state_monitor_creator unspecified
