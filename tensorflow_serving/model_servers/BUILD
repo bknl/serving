@@ -140,7 +140,7 @@ cc_binary(
         "//tensorflow_serving/apis:prediction_service_proto",
         "//tensorflow_serving/config:model_server_config_proto",
         "//tensorflow_serving/core:availability_preserving_policy",
-        "@grpc//:grpc++_unsecure",
+        "@grpc//:grpc++",
     ] + TENSORFLOW_DEPS + SUPPORTED_TENSORFLOW_OPS,
 )
 
