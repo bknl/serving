@@ -44,6 +44,8 @@ limitations under the License.
 // To override the default batching parameters: --batching_parameters_file
 
 #include <unistd.h>
+#include <sstream>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <utility>
@@ -275,12 +277,12 @@ class PredictionServiceImpl final : public PredictionService::Service {
 };
 
 void RunServer(int port, std::unique_ptr<ServerCore> core,
-               bool use_saved_model) {
+               bool use_saved_model,
+               std::shared_ptr<grpc::ServerCredentials> creds) {
   // "0.0.0.0" is the way to listen on localhost in gRPC.
   const string server_address = "0.0.0.0:" + std::to_string(port);
   PredictionServiceImpl service(std::move(core), use_saved_model);
   ServerBuilder builder;
-  std::shared_ptr<grpc::ServerCredentials> creds = InsecureServerCredentials();
   builder.AddListeningPort(server_address, creds);
   builder.RegisterService(&service);
   builder.SetMaxMessageSize(tensorflow::kint32max);
@@ -297,6 +299,22 @@ tensorflow::serving::PlatformConfigMap ParsePlatformConfigMap(
   return platform_config_map;
 }
 
+tensorflow::Status readkey( const tensorflow::string& filename, tensorflow::string& data )
+{
+    std::ifstream file(filename.c_str (), std::ios::in);
+
+    if (file.is_open()) {
+        std::stringstream ss;
+        ss << file.rdbuf ();
+
+        file.close ();
+
+        data = ss.str ();
+        return tensorflow::Status::OK();
+    }
+    return tensorflow::errors::InvalidArgument("Cannot read file: '", filename, "'");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -304,6 +322,9 @@ int main(int argc, char** argv) {
   bool enable_batching = false;
   tensorflow::string batching_parameters_file;
   tensorflow::string model_name = "default";
+  tensorflow::string server_key_path;
+  tensorflow::string server_cert_path;
+  tensorflow::string custom_root_path;
   tensorflow::int32 file_system_poll_wait_seconds = 1;
   tensorflow::string model_base_path;
   const bool use_saved_model = true;
@@ -312,6 +333,9 @@ int main(int argc, char** argv) {
   tensorflow::int64 tensorflow_session_parallelism = 0;
   string platform_config_file = "";
   string model_config_file;
+  bool client_verify;
+  std::shared_ptr<grpc::ServerCredentials> creds;
+
   std::vector<tensorflow::Flag> flag_list = {
       tensorflow::Flag("port", &port, "port to listen on"),
       tensorflow::Flag("enable_batching", &enable_batching, "enable batching"),
@@ -342,11 +366,23 @@ int main(int argc, char** argv) {
                        "Tensorflow session. Auto-configured by default."
                        "Note that this option is ignored if "
                        "--platform_config_file is non-empty."),
+      tensorflow::Flag("server_key", &server_key_path,
+                       "path to private server key for SSL, "
+                       "implies using SSL to connect"),
+      tensorflow::Flag("server_cert", &server_cert_path,
+                       "path to public server certificate for SSL, "
+                       "implies using SSL to connect"),
+      tensorflow::Flag("custom_ca", &custom_root_path,
+                       "path to custom certificate authorities for SSL, "
+                       "implies using SSL to connect"),
+      tensorflow::Flag("client_verify", &client_verify,
+                       "When using SSL, require a valid client certificate"),
       tensorflow::Flag("platform_config_file", &platform_config_file,
                        "If non-empty, read an ascii PlatformConfigMap protobuf "
                        "from the supplied file name, and use that platform "
                        "config instead of the Tensorflow platform. (If used, "
                        "--enable_batching is ignored.)")};
+
   string usage = tensorflow::Flags::Usage(argv[0], flag_list);
   const bool parse_result = tensorflow::Flags::Parse(&argc, argv, flag_list);
   if (!parse_result || (model_base_path.empty() && model_config_file.empty())) {
@@ -356,6 +392,49 @@ int main(int argc, char** argv) {
   tensorflow::port::InitMain(argv[0], &argc, &argv);
   if (argc != 1) {
     std::cout << "unknown argument: " << argv[1] << "\n" << usage;
+  }
+
+  if (server_key_path.size() > 0 && server_cert_path.size() > 0) {
+    tensorflow::string key;
+    tensorflow::string cert;
+    tensorflow::string root;
+
+    TF_CHECK_OK(readkey(server_cert_path, cert));
+    TF_CHECK_OK(readkey(server_key_path, key));
+
+    grpc::SslServerCredentialsOptions sslOps(client_verify == true ?  
+        GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY:
+        GRPC_SSL_DONT_REQUEST_CLIENT_CERTIFICATE);
+
+    if (client_verify == true) {
+        sslOps.force_client_auth = true;
+    }
+
+    if (custom_root_path.size() > 0) {
+      TF_CHECK_OK(readkey ( custom_root_path, root));
+      sslOps.pem_root_certs = root;
+    }
+
+    grpc::SslServerCredentialsOptions::PemKeyCertPair keycert =
+    {
+        key,
+        cert
+    };
+
+    sslOps.pem_key_cert_pairs.push_back (keycert);
+
+    creds = grpc::SslServerCredentials(sslOps);
+
+  } else {
+      if (! server_key_path.empty() && server_cert_path.empty()) {
+        std::cout << "When you specify --server_key you must specify --server_cert as well";
+        return -1;
+      }
+      if (server_key_path.empty() && ! server_cert_path.empty()) {
+        std::cout << "When you specify --server_cert you must specify --server_key as well";
+        return -1;
+      }
+      creds = InsecureServerCredentials();
   }
 
   // For ServerCore Options, we leave servable_state_monitor_creator unspecified
@@ -408,7 +487,7 @@ int main(int argc, char** argv) {
 
   std::unique_ptr<ServerCore> core;
   TF_CHECK_OK(ServerCore::Create(std::move(options), &core));
-  RunServer(port, std::move(core), use_saved_model);
+  RunServer(port, std::move(core), use_saved_model, creds);
 
   return 0;
 }
