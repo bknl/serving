@@ -57,9 +57,11 @@ limitations under the License.
 #include "grpc++/server_builder.h"
 #include "grpc++/server_context.h"
 #include "grpc++/support/status.h"
-#include "grpc++/support/status_code_enum.h"
 #include "grpc/grpc.h"
+#include "tensorflow/cc/saved_model/tag_constants.h"
 #include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/lib/strings/str_util.h"
+#include "tensorflow/core/lib/strings/numbers.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/init_main.h"
 #include "tensorflow/core/platform/protobuf.h"
@@ -70,7 +72,9 @@ limitations under the License.
 #include "tensorflow_serving/apis/prediction_service.pb.h"
 #include "tensorflow_serving/config/model_server_config.pb.h"
 #include "tensorflow_serving/core/availability_preserving_policy.h"
+#include "tensorflow_serving/model_servers/grpc_status_util.h"
 #include "tensorflow_serving/model_servers/model_platform_types.h"
+#include "tensorflow_serving/model_servers/model_service_impl.h"
 #include "tensorflow_serving/model_servers/platform_config_util.h"
 #include "tensorflow_serving/model_servers/server_core.h"
 #include "tensorflow_serving/servables/tensorflow/classification_service.h"
@@ -78,13 +82,15 @@ limitations under the License.
 #include "tensorflow_serving/servables/tensorflow/multi_inference.h"
 #include "tensorflow_serving/servables/tensorflow/predict_impl.h"
 #include "tensorflow_serving/servables/tensorflow/regression_service.h"
+#include "tensorflow_serving/servables/tensorflow/session_bundle_config.pb.h"
 
 namespace grpc {
 class ServerCompletionQueue;
 }  // namespace grpc
 
-using tensorflow::serving::AspiredVersionsManager;
+using tensorflow::string;
 using tensorflow::serving::AspiredVersionPolicy;
+using tensorflow::serving::AspiredVersionsManager;
 using tensorflow::serving::AvailabilityPreservingPolicy;
 using tensorflow::serving::BatchingParameters;
 using tensorflow::serving::EventBus;
@@ -97,8 +103,8 @@ using tensorflow::serving::SessionBundleConfig;
 using tensorflow::serving::TensorflowClassificationServiceImpl;
 using tensorflow::serving::TensorflowRegressionServiceImpl;
 using tensorflow::serving::TensorflowPredictor;
+using tensorflow::serving::TensorflowRegressionServiceImpl;
 using tensorflow::serving::UniquePtrWithDeps;
-using tensorflow::string;
 
 using grpc::InsecureServerCredentials;
 using grpc::Server;
@@ -171,24 +177,10 @@ int DeadlineToTimeoutMillis(const gpr_timespec deadline) {
                    gpr_now(GPR_CLOCK_MONOTONIC)));
 }
 
-grpc::Status ToGRPCStatus(const tensorflow::Status& status) {
-  const int kErrorMessageLimit = 1024;
-  string error_message;
-  if (status.error_message().length() > kErrorMessageLimit) {
-    error_message =
-        status.error_message().substr(0, kErrorMessageLimit) + "...TRUNCATED";
-  } else {
-    error_message = status.error_message();
-  }
-  return grpc::Status(static_cast<grpc::StatusCode>(status.code()),
-                      error_message);
-}
-
 class PredictionServiceImpl final : public PredictionService::Service {
  public:
-  explicit PredictionServiceImpl(std::unique_ptr<ServerCore> core,
-                                 bool use_saved_model)
-      : core_(std::move(core)),
+  explicit PredictionServiceImpl(ServerCore* core, bool use_saved_model)
+      : core_(core),
         predictor_(new TensorflowPredictor(use_saved_model)),
         use_saved_model_(use_saved_model) {}
 
@@ -198,8 +190,8 @@ class PredictionServiceImpl final : public PredictionService::Service {
     // By default, this is infinite which is the same default as RunOptions.
     run_options.set_timeout_in_ms(
         DeadlineToTimeoutMillis(context->raw_deadline()));
-    const grpc::Status status = ToGRPCStatus(
-        predictor_->Predict(run_options, core_.get(), *request, response));
+    const grpc::Status status = tensorflow::serving::ToGRPCStatus(
+        predictor_->Predict(run_options, core_, *request, response));
     if (!status.ok()) {
       VLOG(1) << "Predict failed: " << status.error_message();
     }
@@ -210,13 +202,13 @@ class PredictionServiceImpl final : public PredictionService::Service {
                                 const GetModelMetadataRequest* request,
                                 GetModelMetadataResponse* response) override {
     if (!use_saved_model_) {
-      return ToGRPCStatus(tensorflow::errors::InvalidArgument(
-          "GetModelMetadata API is only available when use_saved_model is "
-          "set to true"));
+      return tensorflow::serving::ToGRPCStatus(
+          tensorflow::errors::InvalidArgument(
+              "GetModelMetadata API is only available when use_saved_model is "
+              "set to true"));
     }
-    const grpc::Status status =
-        ToGRPCStatus(GetModelMetadataImpl::GetModelMetadata(
-            core_.get(), *request, response));
+    const grpc::Status status = tensorflow::serving::ToGRPCStatus(
+        GetModelMetadataImpl::GetModelMetadata(core_, *request, response));
     if (!status.ok()) {
       VLOG(1) << "GetModelMetadata failed: " << status.error_message();
     }
@@ -230,25 +222,24 @@ class PredictionServiceImpl final : public PredictionService::Service {
     // By default, this is infinite which is the same default as RunOptions.
     run_options.set_timeout_in_ms(
         DeadlineToTimeoutMillis(context->raw_deadline()));
-    const grpc::Status status =
-        ToGRPCStatus(TensorflowClassificationServiceImpl::Classify(
-            run_options, core_.get(), *request, response));
+    const grpc::Status status = tensorflow::serving::ToGRPCStatus(
+        TensorflowClassificationServiceImpl::Classify(run_options, core_,
+                                                      *request, response));
     if (!status.ok()) {
       VLOG(1) << "Classify request failed: " << status.error_message();
     }
     return status;
   }
 
-  grpc::Status Regress(ServerContext* context,
-                       const RegressionRequest* request,
+  grpc::Status Regress(ServerContext* context, const RegressionRequest* request,
                        RegressionResponse* response) override {
     tensorflow::RunOptions run_options = tensorflow::RunOptions();
     // By default, this is infinite which is the same default as RunOptions.
     run_options.set_timeout_in_ms(
         DeadlineToTimeoutMillis(context->raw_deadline()));
-    const grpc::Status status =
-        ToGRPCStatus(TensorflowRegressionServiceImpl::Regress(
-            run_options, core_.get(), *request, response));
+    const grpc::Status status = tensorflow::serving::ToGRPCStatus(
+        TensorflowRegressionServiceImpl::Regress(run_options, core_, *request,
+                                                 response));
     if (!status.ok()) {
       VLOG(1) << "Regress request failed: " << status.error_message();
     }
@@ -262,8 +253,8 @@ class PredictionServiceImpl final : public PredictionService::Service {
     // By default, this is infinite which is the same default as RunOptions.
     run_options.set_timeout_in_ms(
         DeadlineToTimeoutMillis(context->raw_deadline()));
-    const grpc::Status status = ToGRPCStatus(
-        RunMultiInference(run_options, core_.get(), *request, response));
+    const grpc::Status status = tensorflow::serving::ToGRPCStatus(
+        RunMultiInference(run_options, core_, *request, response));
     if (!status.ok()) {
       VLOG(1) << "MultiInference request failed: " << status.error_message();
     }
@@ -271,21 +262,57 @@ class PredictionServiceImpl final : public PredictionService::Service {
   }
 
  private:
-  std::unique_ptr<ServerCore> core_;
+  ServerCore* core_;
   std::unique_ptr<TensorflowPredictor> predictor_;
   bool use_saved_model_;
 };
 
+// gRPC Channel Arguments to be passed from command line to gRPC ServerBuilder.
+struct GrpcChannelArgument {
+  string key;
+  string value;
+};
+
+// Parses a comma separated list of gRPC channel arguments into list of
+// ChannelArgument.
+std::vector<GrpcChannelArgument> parseGrpcChannelArgs(
+    const string& channel_arguments_str) {
+  const std::vector<string> channel_arguments =
+        tensorflow::str_util::Split(channel_arguments_str, ",");
+  std::vector<GrpcChannelArgument> result;
+  for (const string& channel_argument : channel_arguments) {
+    const std::vector<string> key_val =
+        tensorflow::str_util::Split(channel_argument, "=");
+    result.push_back({key_val[0], key_val[1]});
+  }
+  return result;
+}
+
 void RunServer(int port, std::unique_ptr<ServerCore> core,
-               bool use_saved_model,
-               std::shared_ptr<grpc::ServerCredentials> creds) {
+               bool use_saved_model, const string& grpc_channel_arguments,
+	       std::shared_ptr<grpc::ServerCredentials> creds) {
   // "0.0.0.0" is the way to listen on localhost in gRPC.
   const string server_address = "0.0.0.0:" + std::to_string(port);
-  PredictionServiceImpl service(std::move(core), use_saved_model);
+  tensorflow::serving::ModelServiceImpl model_service(core.get());
+  PredictionServiceImpl prediction_service(core.get(), use_saved_model);
   ServerBuilder builder;
   builder.AddListeningPort(server_address, creds);
-  builder.RegisterService(&service);
+  builder.RegisterService(&model_service);
+  builder.RegisterService(&prediction_service);
   builder.SetMaxMessageSize(tensorflow::kint32max);
+  const std::vector<GrpcChannelArgument> channel_arguments =
+      parseGrpcChannelArgs(grpc_channel_arguments);
+  for (GrpcChannelArgument channel_argument : channel_arguments) {
+    // gRPC accept arguments of two types, int and string. We will attempt to
+    // parse each arg as int and pass it on as such if successful. Otherwise we
+    // will pass it as a string. gRPC will log arguments that were not accepted.
+    int value;
+    if(tensorflow::strings::safe_strto32(channel_argument.key, &value)) {
+      builder.AddChannelArgument(channel_argument.key, value);
+    } else {
+      builder.AddChannelArgument(channel_argument.key, channel_argument.value);
+    }
+  }
   std::unique_ptr<Server> server(builder.BuildAndStart());
   LOG(INFO) << "Running ModelServer at " << server_address << " ...";
   server->Wait();
@@ -330,6 +357,7 @@ int main(int argc, char** argv) {
   bool flush_filesystem_caches = true;
   tensorflow::string model_base_path;
   const bool use_saved_model = true;
+  tensorflow::string saved_model_tags = tensorflow::kSavedModelTagServe;
   // Tensorflow session parallelism of zero means that both inter and intra op
   // thread pools will be auto configured.
   tensorflow::int64 tensorflow_session_parallelism = 0;
@@ -337,7 +365,7 @@ int main(int argc, char** argv) {
   string model_config_file;
   bool client_verify;
   std::shared_ptr<grpc::ServerCredentials> creds;
-
+  string grpc_channel_arguments = "";
   std::vector<tensorflow::Flag> flag_list = {
       tensorflow::Flag("port", &port, "port to listen on"),
       tensorflow::Flag("enable_batching", &enable_batching, "enable batching"),
@@ -397,7 +425,15 @@ int main(int argc, char** argv) {
           "Fraction that each process occupies of the GPU memory space "
           "the value is between 0.0 and 1.0 (with 0.0 as the default) "
           "If 1.0, the server will allocate all the memory when the server "
-          "starts, If 0.0, Tensorflow will automatically select a value.")};
+          "starts, If 0.0, Tensorflow will automatically select a value."),
+      tensorflow::Flag("saved_model_tags", &saved_model_tags,
+                       "Comma-separated set of tags corresponding to the meta "
+                       "graph def to load from SavedModel."),
+      tensorflow::Flag(
+                       "grpc_channel_arguments", &grpc_channel_arguments,
+                       "A comma separated list of arguments to be passed to "
+                       "the grpc server. (e.g. "
+                       "grpc.max_connection_age_ms=2000)")};
 
   string usage = tensorflow::Flags::Usage(argv[0], flag_list);
   const bool parse_result = tensorflow::Flags::Parse(&argc, argv, flag_list);
@@ -492,6 +528,11 @@ int main(int argc, char** argv) {
         ->set_intra_op_parallelism_threads(tensorflow_session_parallelism);
     session_bundle_config.mutable_session_config()
         ->set_inter_op_parallelism_threads(tensorflow_session_parallelism);
+    const std::vector<string> tags =
+        tensorflow::str_util::Split(saved_model_tags, ",");
+    for (const string& tag : tags) {
+      *session_bundle_config.add_saved_model_tags() = tag;
+    }
     options.platform_config_map = CreateTensorFlowPlatformConfigMap(
         session_bundle_config, use_saved_model);
   } else {
@@ -507,7 +548,7 @@ int main(int argc, char** argv) {
 
   std::unique_ptr<ServerCore> core;
   TF_CHECK_OK(ServerCore::Create(std::move(options), &core));
-  RunServer(port, std::move(core), use_saved_model, creds);
+  RunServer(port, std::move(core), use_saved_model, grpc_channel_arguments, creds);
 
   return 0;
 }
