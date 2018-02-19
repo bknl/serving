@@ -208,6 +208,7 @@ cc_binary(
         "main.cc",
     ],
     visibility = ["//tensorflow_serving:internal"],
+    linkopts = ["-rdynamic"],
     deps = [
         ":model_platform_types",
         ":platform_config_util",
@@ -215,6 +216,7 @@ cc_binary(
         ":grpc_status_util",
         ":model_service_impl",
         "@protobuf_archive//:cc_wkt_protos",
+        "@org_tensorflow//tensorflow/c:c_api",
         "@org_tensorflow//tensorflow/core:lib",
         "@org_tensorflow//tensorflow/core/platform/cloud:gcs_file_system",
         "@org_tensorflow//tensorflow/core/platform/hadoop:hadoop_file_system",

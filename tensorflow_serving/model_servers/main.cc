@@ -58,12 +58,14 @@ limitations under the License.
 #include "grpc++/server_context.h"
 #include "grpc++/support/status.h"
 #include "grpc/grpc.h"
+#include "tensorflow/c/c_api.h"
 #include "tensorflow/cc/saved_model/tag_constants.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/numbers.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/init_main.h"
+#include "tensorflow/core/platform/load_library.h"
 #include "tensorflow/core/platform/protobuf.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/protobuf/config.pb.h"
@@ -363,6 +365,7 @@ int main(int argc, char** argv) {
   tensorflow::int64 tensorflow_session_parallelism = 0;
   string platform_config_file = "";
   string model_config_file;
+  string librarypath;
   bool client_verify;
   std::shared_ptr<grpc::ServerCredentials> creds;
   string grpc_channel_arguments = "";
@@ -404,6 +407,8 @@ int main(int argc, char** argv) {
                        "Tensorflow session. Auto-configured by default."
                        "Note that this option is ignored if "
                        "--platform_config_file is non-empty."),
+      tensorflow::Flag("loadlibrary", &librarypath,
+                       "load additional operators from given user_op library"),
       tensorflow::Flag("server_key", &server_key_path,
                        "path to private server key for SSL, "
                        "implies using SSL to connect"),
@@ -487,6 +492,19 @@ int main(int argc, char** argv) {
         return -1;
       }
       creds = InsecureServerCredentials();
+  }
+
+ if (librarypath.size() > 0) {
+    TF_Status* status = TF_NewStatus();
+    // Load the library.
+      TF_LoadLibrary(librarypath.c_str(), status);
+      if (!TF_GetCode(status) == TF_OK) {
+        string status_msg(TF_Message(status));
+        std::cout << "Problem loading user_op library " <<  librarypath << ": " <<
+            TF_Message(status);
+        return -1;
+    }
+    TF_DeleteStatus(status);
   }
 
   // For ServerCore Options, we leave servable_state_monitor_creator unspecified
