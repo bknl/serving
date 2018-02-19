@@ -83,9 +83,8 @@ namespace grpc {
 class ServerCompletionQueue;
 }  // namespace grpc
 
-using tensorflow::string;
-using tensorflow::serving::AspiredVersionPolicy;
 using tensorflow::serving::AspiredVersionsManager;
+using tensorflow::serving::AspiredVersionPolicy;
 using tensorflow::serving::AvailabilityPreservingPolicy;
 using tensorflow::serving::BatchingParameters;
 using tensorflow::serving::EventBus;
@@ -98,8 +97,8 @@ using tensorflow::serving::SessionBundleConfig;
 using tensorflow::serving::TensorflowClassificationServiceImpl;
 using tensorflow::serving::TensorflowRegressionServiceImpl;
 using tensorflow::serving::TensorflowPredictor;
-using tensorflow::serving::TensorflowRegressionServiceImpl;
 using tensorflow::serving::UniquePtrWithDeps;
+using tensorflow::string;
 
 using grpc::InsecureServerCredentials;
 using grpc::Server;
