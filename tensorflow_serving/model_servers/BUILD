@@ -169,7 +169,7 @@ cc_library(
         ":grpc_status_util",
         ":server_core",
         "//tensorflow_serving/apis:model_service_proto",
-        "@grpc//:grpc++_unsecure",
+        "@grpc//:grpc++",
     ],
 )
 
@@ -181,7 +181,7 @@ cc_library(
         "//visibility:public",
     ],
     deps = [
-        "@grpc//:grpc++_unsecure",
+        "@grpc//:grpc++",
         "@org_tensorflow//tensorflow/core:lib",
     ],
 )
