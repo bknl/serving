@@ -36,3 +36,9 @@ def tf_serving_workspace():
       name = "cares",
       actual = "@grpc//third_party/nanopb:nanopb",
   )
+
+  # Use the secure (SSL-enabled) version of gRPC.
+  native.bind(
+      name = "grpc_lib",
+      actual = "@grpc//:grpc++",
+  )
