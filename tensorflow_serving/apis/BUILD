@@ -21,7 +21,7 @@ filegroup(
 load("//tensorflow_serving:serving.bzl", "serving_proto_library")
 load("//tensorflow_serving:serving.bzl", "serving_proto_library_py")
 load("//tensorflow_serving:serving.bzl", "serving_go_grpc_library")
-load("@org_tensorflow//tensorflow/core:platform/default/build_config.bzl", "tf_pyclif_proto_library")
+load("@org_tensorflow//tensorflow/core:platform/default/build_config.bzl", "tf_jspb_proto_library", "tf_pyclif_proto_library")
 
 serving_proto_library(
     name = "get_model_metadata_proto",
@@ -50,9 +50,9 @@ serving_proto_library(
     srcs = ["input.proto"],
     cc_api_version = 2,
     java_api_version = 2,
+    js_api_version = 2,
     deps = [
         "@org_tensorflow//tensorflow/core:protos_all_cc",
-        "@protobuf_archive//:cc_wkt_protos",
     ],
 )
 
@@ -69,6 +69,11 @@ tf_pyclif_proto_library(
     name = "input_pyclif",
     proto_lib = ":input_proto",
     proto_srcfile = "input.proto",
+)
+
+tf_jspb_proto_library(
+    name = "input_jspb_proto",
+    deps = [":input_proto"],
 )
 
 serving_proto_library(
@@ -95,6 +100,11 @@ tf_pyclif_proto_library(
     proto_srcfile = "model.proto",
 )
 
+tf_jspb_proto_library(
+    name = "model_jspb_proto",
+    deps = [":model_proto"],
+)
+
 serving_proto_library(
     name = "predict_proto",
     srcs = ["predict.proto"],
@@ -114,6 +124,11 @@ serving_proto_library_py(
         ":model_proto_py_pb2",
         "@org_tensorflow//tensorflow/core:protos_all_py",
     ],
+)
+
+tf_jspb_proto_library(
+    name = "predict_jspb_proto",
+    deps = [":predict_proto"],
 )
 
 serving_proto_library(
@@ -158,6 +173,12 @@ py_library(
         ":predict_proto_py_pb2",
         ":regression_proto_py_pb2",
     ],
+)
+
+tf_pyclif_proto_library(
+    name = "predict_pyclif",
+    proto_lib = ":predict_proto",
+    proto_srcfile = "predict.proto",
 )
 
 serving_go_grpc_library(
@@ -255,6 +276,11 @@ tf_pyclif_proto_library(
     proto_srcfile = "classification.proto",
 )
 
+tf_jspb_proto_library(
+    name = "classification_jspb_proto",
+    deps = [":classification_proto"],
+)
+
 serving_proto_library(
     name = "inference_proto",
     srcs = ["inference.proto"],
@@ -306,6 +332,11 @@ serving_proto_library_py(
         ":model_proto_py_pb2",
         "@org_tensorflow//tensorflow/core:protos_all_py",
     ],
+)
+
+tf_jspb_proto_library(
+    name = "regression_jspb_proto",
+    deps = [":regression_proto"],
 )
 
 serving_proto_library(

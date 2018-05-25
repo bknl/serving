@@ -63,7 +63,6 @@ limitations under the License.
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/strings/numbers.h"
 #include "tensorflow/core/lib/strings/str_util.h"
-#include "tensorflow/core/lib/strings/numbers.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/init_main.h"
 #include "tensorflow/core/platform/load_library.h"
@@ -104,7 +103,6 @@ using tensorflow::serving::ServableState;
 using tensorflow::serving::ServerCore;
 using tensorflow::serving::SessionBundleConfig;
 using tensorflow::serving::TensorflowClassificationServiceImpl;
-using tensorflow::serving::TensorflowRegressionServiceImpl;
 using tensorflow::serving::TensorflowPredictor;
 using tensorflow::serving::TensorflowRegressionServiceImpl;
 using tensorflow::serving::UniquePtrWithDeps;
@@ -310,8 +308,8 @@ void RunServer(int port, std::unique_ptr<ServerCore> core,
     // gRPC accept arguments of two types, int and string. We will attempt to
     // parse each arg as int and pass it on as such if successful. Otherwise we
     // will pass it as a string. gRPC will log arguments that were not accepted.
-    int value;
-    if (tensorflow::strings::safe_strto32(channel_argument.key, &value)) {
+    tensorflow::int32 value;
+    if (tensorflow::strings::safe_strto32(channel_argument.value, &value)) {
       builder.AddChannelArgument(channel_argument.key, value);
     } else {
       builder.AddChannelArgument(channel_argument.key, channel_argument.value);
