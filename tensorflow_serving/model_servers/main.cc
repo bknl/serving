@@ -50,17 +50,17 @@ limitations under the License.
 #include <vector>
 
 #include "google/protobuf/wrappers.pb.h"
-#include "grpc++/security/server_credentials.h"
-#include "grpc++/server.h"
-#include "grpc++/server_builder.h"
-#include "grpc++/server_context.h"
-#include "grpc++/support/status.h"
 #include "grpc/grpc.h"
 #include "tensorflow/c/c_api.h"
+#include "grpcpp/security/server_credentials.h"
+#include "grpcpp/server.h"
+#include "grpcpp/server_builder.h"
+#include "grpcpp/server_context.h"
+#include "grpcpp/support/status.h"
 #include "tensorflow/cc/saved_model/tag_constants.h"
 #include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/numbers.h"
+#include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/init_main.h"
 #include "tensorflow/core/platform/load_library.h"
@@ -73,13 +73,14 @@ limitations under the License.
 #include "tensorflow_serving/config/model_server_config.pb.h"
 #include "tensorflow_serving/core/availability_preserving_policy.h"
 #include "tensorflow_serving/model_servers/grpc_status_util.h"
+#include "tensorflow_serving/model_servers/http_server.h"
 #include "tensorflow_serving/model_servers/model_platform_types.h"
 #include "tensorflow_serving/model_servers/model_service_impl.h"
 #include "tensorflow_serving/model_servers/platform_config_util.h"
 #include "tensorflow_serving/model_servers/server_core.h"
 #include "tensorflow_serving/servables/tensorflow/classification_service.h"
 #include "tensorflow_serving/servables/tensorflow/get_model_metadata_impl.h"
-#include "tensorflow_serving/servables/tensorflow/multi_inference.h"
+#include "tensorflow_serving/servables/tensorflow/multi_inference_helper.h"
 #include "tensorflow_serving/servables/tensorflow/predict_impl.h"
 #include "tensorflow_serving/servables/tensorflow/regression_service.h"
 #include "tensorflow_serving/servables/tensorflow/session_bundle_config.pb.h"
@@ -101,7 +102,6 @@ using tensorflow::serving::ServableState;
 using tensorflow::serving::ServerCore;
 using tensorflow::serving::SessionBundleConfig;
 using tensorflow::serving::TensorflowClassificationServiceImpl;
-using tensorflow::serving::TensorflowRegressionServiceImpl;
 using tensorflow::serving::TensorflowPredictor;
 using tensorflow::serving::TensorflowRegressionServiceImpl;
 using tensorflow::serving::UniquePtrWithDeps;
@@ -253,8 +253,9 @@ class PredictionServiceImpl final : public PredictionService::Service {
     // By default, this is infinite which is the same default as RunOptions.
     run_options.set_timeout_in_ms(
         DeadlineToTimeoutMillis(context->raw_deadline()));
-    const grpc::Status status = tensorflow::serving::ToGRPCStatus(
-        RunMultiInference(run_options, core_, *request, response));
+    const grpc::Status status =
+        tensorflow::serving::ToGRPCStatus(RunMultiInferenceWithServerCore(
+            run_options, core_, *request, response));
     if (!status.ok()) {
       VLOG(1) << "MultiInference request failed: " << status.error_message();
     }
@@ -278,7 +279,7 @@ struct GrpcChannelArgument {
 std::vector<GrpcChannelArgument> parseGrpcChannelArgs(
     const string& channel_arguments_str) {
   const std::vector<string> channel_arguments =
-        tensorflow::str_util::Split(channel_arguments_str, ",");
+      tensorflow::str_util::Split(channel_arguments_str, ",");
   std::vector<GrpcChannelArgument> result;
   for (const string& channel_argument : channel_arguments) {
     const std::vector<string> key_val =
@@ -288,8 +289,15 @@ std::vector<GrpcChannelArgument> parseGrpcChannelArgs(
   return result;
 }
 
-void RunServer(int port, std::unique_ptr<ServerCore> core,
-               bool use_saved_model, const string& grpc_channel_arguments) {
+struct HttpServerOptions {
+  tensorflow::int32 port;
+  tensorflow::int32 num_threads;
+  tensorflow::int32 timeout_in_ms;
+};
+
+void RunServer(int port, std::unique_ptr<ServerCore> core, bool use_saved_model,
+               const string& grpc_channel_arguments,
+               const HttpServerOptions& http_options) {
   // "0.0.0.0" is the way to listen on localhost in gRPC.
   const string server_address = "0.0.0.0:" + std::to_string(port);
   tensorflow::serving::ModelServiceImpl model_service(core.get());
@@ -306,8 +314,8 @@ void RunServer(int port, std::unique_ptr<ServerCore> core,
     // gRPC accept arguments of two types, int and string. We will attempt to
     // parse each arg as int and pass it on as such if successful. Otherwise we
     // will pass it as a string. gRPC will log arguments that were not accepted.
-    int value;
-    if(tensorflow::strings::safe_strto32(channel_argument.key, &value)) {
+    tensorflow::int32 value;
+    if (tensorflow::strings::safe_strto32(channel_argument.value, &value)) {
       builder.AddChannelArgument(channel_argument.key, value);
     } else {
       builder.AddChannelArgument(channel_argument.key, channel_argument.value);
@@ -315,6 +323,26 @@ void RunServer(int port, std::unique_ptr<ServerCore> core,
   }
   std::unique_ptr<Server> server(builder.BuildAndStart());
   LOG(INFO) << "Running ModelServer at " << server_address << " ...";
+
+  if (http_options.port != 0) {
+    if (http_options.port != port) {
+      const string server_address =
+          "localhost:" + std::to_string(http_options.port);
+      auto http_server =
+          CreateAndStartHttpServer(http_options.port, http_options.num_threads,
+                                   http_options.timeout_in_ms, core.get());
+      if (http_server != nullptr) {
+        LOG(INFO) << "Exporting HTTP/REST API at:" << server_address << " ...";
+        http_server->WaitForTermination();
+      } else {
+        LOG(ERROR) << "Failed to start HTTP Server at " << server_address;
+      }
+    } else {
+      LOG(ERROR) << "--rest_api_port cannot be same as --port. "
+                 << "Please use a different port for HTTP/REST API. "
+                 << "Skipped exporting HTTP/REST API.";
+    }
+  }
   server->Wait();
 }
 
@@ -330,6 +358,10 @@ tensorflow::serving::PlatformConfigMap ParsePlatformConfigMap(
 
 int main(int argc, char** argv) {
   tensorflow::int32 port = 8500;
+  HttpServerOptions http_options;
+  http_options.port = 0;
+  http_options.num_threads = 4 * tensorflow::port::NumSchedulableCPUs();
+  http_options.timeout_in_ms = 30000;  // 30 seconds.
   bool enable_batching = false;
   float per_process_gpu_memory_fraction = 0;
   tensorflow::string batching_parameters_file;
@@ -346,8 +378,18 @@ int main(int argc, char** argv) {
   string model_config_file;
   string librarypath;
   string grpc_channel_arguments = "";
+  bool enable_model_warmup = true;
   std::vector<tensorflow::Flag> flag_list = {
-      tensorflow::Flag("port", &port, "port to listen on"),
+      tensorflow::Flag("port", &port, "Port to listen on for gRPC API"),
+      tensorflow::Flag("rest_api_port", &http_options.port,
+                       "Port to listen on for HTTP/REST API. If set to zero "
+                       "HTTP/REST API will not be exported. This port must be "
+                       "different than the one specified in --port."),
+      tensorflow::Flag("rest_api_num_threads", &http_options.num_threads,
+                       "Number of threads for HTTP/REST API processing. If not "
+                       "set, will be auto set based on number of CPUs."),
+      tensorflow::Flag("rest_api_timeout_in_ms", &http_options.timeout_in_ms,
+                       "Timeout for HTTP/REST API calls."),
       tensorflow::Flag("enable_batching", &enable_batching, "enable batching"),
       tensorflow::Flag("batching_parameters_file", &batching_parameters_file,
                        "If non-empty, read an ascii BatchingParameters "
@@ -400,11 +442,14 @@ int main(int argc, char** argv) {
       tensorflow::Flag("saved_model_tags", &saved_model_tags,
                        "Comma-separated set of tags corresponding to the meta "
                        "graph def to load from SavedModel."),
-      tensorflow::Flag(
-                       "grpc_channel_arguments", &grpc_channel_arguments,
+      tensorflow::Flag("grpc_channel_arguments", &grpc_channel_arguments,
                        "A comma separated list of arguments to be passed to "
                        "the grpc server. (e.g. "
-                       "grpc.max_connection_age_ms=2000)")};
+                       "grpc.max_connection_age_ms=2000)"),
+      tensorflow::Flag("enable_model_warmup", &enable_model_warmup,
+                       "Enables model warmup, which triggers lazy "
+                       "initializations (such as TF optimizations) at load "
+                       "time, to reduce first request latency.")};
 
   string usage = tensorflow::Flags::Usage(argv[0], flag_list);
   const bool parse_result = tensorflow::Flags::Parse(&argc, argv, flag_list);
@@ -474,6 +519,7 @@ int main(int argc, char** argv) {
     for (const string& tag : tags) {
       *session_bundle_config.add_saved_model_tags() = tag;
     }
+    session_bundle_config.set_enable_model_warmup(enable_model_warmup);
     options.platform_config_map = CreateTensorFlowPlatformConfigMap(
         session_bundle_config, use_saved_model);
   } else {
@@ -489,7 +535,8 @@ int main(int argc, char** argv) {
 
   std::unique_ptr<ServerCore> core;
   TF_CHECK_OK(ServerCore::Create(std::move(options), &core));
-  RunServer(port, std::move(core), use_saved_model, grpc_channel_arguments);
+  RunServer(port, std::move(core), use_saved_model, grpc_channel_arguments,
+            http_options);
 
   return 0;
 }
